@@ -1,23 +1,27 @@
 // constructlog - construction office trucks deliver to several sites in one
 // trip.
 //
-// The office hands a job to a truck in FUN_1401561c0 (the office job
-// function): it picks the site that needs a resource most, builds the
-// schedule source -> site -> office and sets the load at the source to what
-// that one site still needs (record 0, +4: fraction of the truck's capacity).
-// A 20 t truck carrying 5 t, then 2 t, then 10 t makes three trips.
+// Each office tick builds a list of jobs, one per site and resource
+// (FUN_14014eb10: the site's need = required - delivered - in transit), picks
+// a truck for each and hands it over in FUN_140150960 (the dispatch): the
+// schedule becomes source -> site -> office and the load at the source is
+// what that one site still needs (stop record 0, +4: fraction of the truck's
+// capacity). A 20 t truck carrying 5 t, then 2 t, then 10 t makes three trips.
 //
-// The plugin lets the game choose as before, then adds up to max_extra_sites
-// more sites of the same office that need the same resource, nearest first,
-// between the site and the office, and raises the load to their sum. The
-// game's unloading already stops at what a site needs (+1 t), so the rest
-// stays on the truck for the next site.
+// The plugin lets the game dispatch as before, then adds up to
+// max_extra_sites more sites of the same office that need the same resource,
+// nearest first, between the site and the office, and raises the load to
+// their sum. The game's unloading already stops at what a site needs (+1 t),
+// so the rest stays on the truck for the next site.
 //
-// The office reserves cargo in transit through FUN_14014cdc0 (a site's need
-// for a resource): it counts capacity x load of every truck whose second stop
-// is that site. With a fuller truck that would reserve too much at the first
-// site and nothing at the others, so its calls are redirected and the answer
-// corrected from the plugin's own plan for each truck.
+// Cargo in transit is counted per truck by FUN_1401541a0: a site anywhere
+// ahead in its schedule gets the truck's whole planned load. With several
+// sites on board that would reserve the full load at each of them, so its
+// one call is redirected and answered from the plugin's plan for the truck.
+//
+// What is left on board after the last site (the margin, or a site that
+// took less) is thrown away with the game's own "discard cargo" once the truck
+// is past that site, so it comes back empty and free for any job.
 //
 // Addresses, formulas and the reasoning: docs/findings.md.
 
@@ -25,73 +29,98 @@
 #include <math.h>
 #include <unordered_map>
 
-#define CL_VERSION "0.1.3"
+#define CL_VERSION "0.2.4"
 #define CL_INI     "plugins\\constructlog.ini"
 
 // ---------------------------------------------------------------- signatures (1.1.1.9)
-static const short SIG_OFFICE_JOB[] = {     // FUN_1401561c0(world, truck, office, int, char) -> bool
-    0x48,0x8b,0xc4, 0x55, 0x56, 0x57, 0x41,0x54, 0x41,0x55, 0x41,0x56, 0x41,0x57,
-    0x48,0x8d,0xa8,0x08,0xfd,0xff,0xff, 0x48,0x81,0xec,0xc0,0x03,0x00,0x00,
-    0x48,0xc7,0x45,0x68,0xfe,0xff,0xff,0xff, 0x48,0x89,0x58,0x20,
+static const short SIG_DISPATCH[] = {       // FUN_140150960(world, job*, office) -> char
+    0x48,0x8b,0xc4, 0x41,0x56, 0x48,0x81,0xec,0x80,0x00,0x00,0x00, 0x48,0xc7,0x40,0xa8,0xfe,0xff,0xff,0xff,
+    0x48,0x89,0x58,0x08, 0x48,0x89,0x68,0x10, 0x48,0x89,0x70,0x18,
 };
-static const short SIG_SITE_NEED[] = {      // FUN_14014cdc0(world, site, resource, job, ...) -> bool
-    0x48,0x89,0x4c,0x24,0x08, 0x53, 0x56, 0x57, 0x48,0x83,0xec,0x30, 0x4c,0x8b,0x9c,0x24,0x88,0x00,0x00,0x00,
-    0x33,0xff, 0x48,0x89,0x6c,0x24,0x58, 0x49,0x8b,0xd8, 0x4c,0x89,0x6c,0x24,0x68, 0x45,0x8b,0xe9,
+static const short SIG_TRANSIT[] = {        // FUN_1401541a0(world, resource, truck, site, char) -> float
+    0x48,0x89,0x5c,0x24,0x10, 0x56, 0x48,0x83,0xec,0x20, 0x49,0x8b,0xd9, 0x4d,0x8b,0xd0, 0x4c,0x8b,0xda,
+    0x48,0x8b,0xf1, 0x0f,0x57,0xc0, 0x48,0x85,0xd2,
+};
+static const short SIG_NEED[] = {           // FUN_1401544a0(world, site, resource, char, float*) -> float
+    0x48,0x89,0x5c,0x24,0x08, 0x48,0x89,0x6c,0x24,0x10, 0x48,0x89,0x74,0x24,0x18, 0x48,0x89,0x7c,0x24,0x20,
+    0x41,0x56, 0x48,0x83,0xec,0x30, 0x48,0x8b,0x74,0x24,0x60,
+};
+static const short SIG_CAPACITY[] = {       // FUN_1406bddb0(truck, resource, char full, char) -> float
+    0x48,0x89,0x5c,0x24,0x18, 0x48,0x89,0x74,0x24,0x20, 0x57, 0x41,0x54, 0x41,0x56,
+    0x48,0x3b,0x15,-1,-1,-1,-1, 0x4c,0x8b,0xd2, 0x4c,0x8b,0x99,0x08,0x17,0x00,0x00,
 };
 static const short SIG_INSERT_STOP[] = {    // FUN_14067d5d0(truck, building, after, raw) -> char
     0x48,0x89,0x54,0x24,0x10, 0x55, 0x56, 0x57, 0x41,0x54, 0x41,0x55, 0x41,0x56, 0x41,0x57,
     0x48,0x81,0xec,0xe0,0x01,0x00,0x00, 0x48,0xc7,0x44,0x24,0x30,0xfe,0xff,0xff,0xff,
     0x48,0x89,0x9c,0x24,0x30,0x02,0x00,0x00,
 };
-#define OFFICE_JOB_CALLS 8          // 2 in the office tick, 6 in a window
-#define SITE_NEED_CALLS  9          // all in the office job function, one per resource
+static const short SIG_DISCARD[] = {        // FUN_1406beee0(vehicle, char) - the "discard cargo" button
+    0x40,0x57, 0x41,0x57, 0x48,0x83,0xec,0x38, 0x48,0x8b,0x81,0xa8,0x03,0x00,0x00, 0x45,0x33,0xff,
+    0x48,0x2b,0x81,0xa0,0x03,0x00,0x00,
+};
+#define DISPATCH_CALLS 3            // 2 in the office tick, 1 elsewhere
+#define TRANSIT_CALLS  1            // FUN_140154090, the in-transit sum
 
 #define SIG(x) x, sizeof(x) / sizeof(x[0])
 
 // ---------------------------------------------------------------- game layout
+// world
+#define W_WORKERS    0xC2C8  // resource*: workers
+// office job (0x40 bytes, FUN_14014eb10)
+#define J_SITE       0x00
+#define J_SOURCE     0x08
+#define J_TRUCK      0x10
+#define J_RESOURCE   0x20
+#define J_NO_RETURN  0x28    // int: 0 = the office is the last stop
+#define J_LOAD       0x30    // float: load fraction for stop 0
+#define J_NEED       0x34    // float: what the site still needs
 // vehicle
 #define V_CARGO      0x3B8   // vector of 16-byte {resource*, float amount, float}
-#define V_JOB        0x50C   // int: the office job (resource kind) the truck is on
 #define V_RECORDS    0x638   // vector of 0x198-byte stop settings, one per stop
 #define V_STOPS      0x680   // vector of building*
 #define V_STOP_INDEX 0x698   // int: the stop it is going to / at
+#define V_IN         0x4F0   // building*: the one it is in
+#define V_OFFICE     0x4F8   // building*: its workplace
 #define V_TYPE       0x1708
 // vehicle type
-#define T_CLASS      0x8600  // int: cargo class, picks the resource's unit
-#define T_CAPACITY   0x8604  // float
-// resource: float unit per cargo class at +0xCC + class * 0x20
-#define R_UNIT       0xCC
+#define T_CLASS      0x8600  // int: cargo class (7 = passengers, 0x12 = machines)
 // stop settings (0x198 bytes)
 #define REC_SIZE     0x198
+#define REC_LOAD_ON  0x00    // u8: load here
 #define REC_LOAD     0x04    // float: load up to this fraction of the capacity
-#define REC_FILTER   0x08    // vector of 16-byte {resource*, ...}: what is loaded here
+#define REC_UNLOAD_ON 0xC8   // u8: unload here
+#define REC_UNLOAD   0xCC    // float
 // building
 #define B_POSITION   0x3A0   // float3: its C3D_NODE (+0x320) position (+0x80)
-#define B_SITE_OFFICES 0x880 // construction site: vector of office*
-#define B_VEHICLES   0xC70   // vector of vehicle*: those belonging to it
 #define B_OFFICE_SITES 0xF90 // construction office: vector of site*
 
-typedef bool (*FnOfficeJob)(BYTE* world, BYTE* truck, BYTE* office, int a4, char a5);
-typedef bool (*FnSiteNeed)(BYTE* world, BYTE* site, BYTE* res, int job, float* need, float* have,
-                           float* progress, float* loading, BYTE* source);
-typedef char (*FnInsertStop)(BYTE* truck, BYTE* building, int after, char raw);
+typedef char  (*FnDispatch)(BYTE* world, BYTE* job, BYTE* office);
+typedef float (*FnTransit)(BYTE* world, BYTE* res, BYTE* truck, BYTE* site, char flag);
+typedef float (*FnNeed)(BYTE* world, BYTE* site, BYTE* res, char lessTransit, float* transit);
+typedef float (*FnCapacity)(BYTE* truck, BYTE* res, char full, char any);
+typedef char  (*FnInsertStop)(BYTE* truck, BYTE* building, int after, char raw);
+typedef void  (*FnDiscard)(BYTE* vehicle, char keep);
 
-static FnOfficeJob  g_officeJob;
-static FnSiteNeed   g_siteNeed;
+static FnDispatch   g_dispatch;
+static FnTransit    g_transit;
+static FnNeed       g_need;
+static FnCapacity   g_capacity;
 static FnInsertStop g_insertStop;
+static FnDiscard    g_discard;
 
 // ---------------------------------------------------------------- settings
 static struct {
     int   maxExtra;         // sites added to one trip
     float maxDistance;      // m from the first site, 0 = any
     float minExtra;         // t: smaller rests are not worth a stop
-    DWORD jobs;             // bit n: office job n may take several sites
+    float margin;           // t loaded on top: the last site takes it (it accepts its need + 1 t)
+    int   clearRest;        // throw away what is left after the last site
     int   log;
-    int   trace;            // every office job call, the first 200
 } cfg;
 
 // ---------------------------------------------------------------- reading
 template <class T> static T Get(const BYTE* p, size_t off) { T v; memcpy(&v, p + off, sizeof(T)); return v; }
+template <class T> static void Set(BYTE* p, size_t off, T v) { memcpy(p + off, &v, sizeof(T)); }
 
 static BYTE* Ptr(const BYTE* p, size_t off) { return Get<BYTE*>(p, off); }
 
@@ -107,28 +136,13 @@ static BYTE* Item(const BYTE* p, size_t off, size_t stride, size_t i) { return P
 
 static BYTE* Stop(const BYTE* truck, size_t i) { return Ptr(Item(truck, V_STOPS, 8, i), 0); }
 
+static BYTE* Record(const BYTE* truck, size_t i) { return Item(truck, V_RECORDS, REC_SIZE, i); }
+
 static float Distance(const BYTE* a, const BYTE* b)
 {
     float dx = Get<float>(a, B_POSITION) - Get<float>(b, B_POSITION);
     float dz = Get<float>(a, B_POSITION + 8) - Get<float>(b, B_POSITION + 8);
     return sqrtf(dx * dx + dz * dz);
-}
-
-// What the truck holds of res when full.
-static float Capacity(const BYTE* truck, const BYTE* res)
-{
-    BYTE* type = Ptr(truck, V_TYPE);
-    if (!type || !res) return 0.0f;
-    int cls = Get<int>(type, T_CLASS);
-    if (cls < 0 || cls > 64) return 0.0f;
-    return Get<float>(res, R_UNIT + cls * 0x20) * Get<float>(type, T_CAPACITY);
-}
-
-static bool CarriesSlot(const BYTE* truck, const BYTE* res)
-{
-    for (size_t i = 0, n = Count(truck, V_CARGO, 16); i < n; ++i)
-        if (Ptr(Item(truck, V_CARGO, 16, i), 0) == res) return true;
-    return false;
 }
 
 static float CargoTotal(const BYTE* truck)
@@ -143,7 +157,6 @@ static float CargoTotal(const BYTE* truck)
 #define MAX_EXTRA 8
 struct PlanStop { BYTE* site; int index; float amount; };
 struct Plan {
-    int      job;
     BYTE*    res;
     BYTE*    source;
     int      n;
@@ -155,7 +168,6 @@ static std::unordered_map<BYTE*, Plan> g_plans;     // by truck, under g_lock
 // The truck still runs the trip the plan describes.
 static bool PlanValid(const BYTE* truck, const Plan& p)
 {
-    if (Get<int>(truck, V_JOB) != p.job) return false;
     size_t n = Count(truck, V_STOPS, 8);
     if (n < 2 || Stop(truck, 0) != p.source) return false;
     for (int i = 0; i < p.n; ++i)
@@ -163,91 +175,118 @@ static bool PlanValid(const BYTE* truck, const Plan& p)
     return true;
 }
 
-// How much the game counts for this truck at site, and how much the plan does.
-static void Reserved(const BYTE* truck, const Plan& p, const BYTE* site, const BYTE* res, int job,
-                     float* game, float* plan)
+// ---------------------------------------------------------------- hooks
+// The trip is over: past its last site, or the schedule was changed and the
+// truck is on its way back to (or in) its office. What is left on board then
+// goes - otherwise the truck waits in the office with it until a job for
+// that resource comes up.
+static bool Finished(BYTE* truck, const Plan& p)
 {
-    *game = *plan = 0.0f;
-    if (Get<int>(truck, V_JOB) != job) return;
     int at = Get<int>(truck, V_STOP_INDEX);
-    if (Count(truck, V_STOPS, 8) > 1 && Stop(truck, 1) == site && at < 2 && CarriesSlot(truck, res) &&
-        Count(truck, V_RECORDS, REC_SIZE))
-        *game = Capacity(truck, res) * Get<float>(Item(truck, V_RECORDS, REC_SIZE, 0), REC_LOAD);
-    if (p.res != res) return;
-    for (int i = 0; i < p.n; ++i)
-        if (p.s[i].site == site && at <= p.s[i].index) *plan += p.s[i].amount;
+    bool valid = PlanValid(truck, p);
+    bool over;
+    if (valid) over = at > p.s[p.n - 1].index;
+    else {
+        BYTE* office = Ptr(truck, V_OFFICE);
+        size_t n = Count(truck, V_STOPS, 8);
+        over = office && (Ptr(truck, V_IN) == office || (at >= 0 && (size_t)at < n && Stop(truck, at) == office));
+        if (!over && cfg.log) Logf("constructlog  truck %p: schedule changed, its plan is dropped", truck);
+        if (!over) return true;                           // dropped, nothing thrown away
+    }
+    if (!over) return false;
+    float left = CargoTotal(truck);
+    if (cfg.clearRest && left > 0.0f) {
+        g_discard(truck, 0);
+        if (cfg.log) Logf("constructlog  truck %p: trip done, %.2f left on board thrown away", truck, left);
+    }
+    return true;
 }
 
-// Plan minus game, over every truck of every office serving the site.
-static float PlanCorrection(const BYTE* site, const BYTE* res, int job)
+// FUN_1401541a0: what this truck brings to site. The game finds the site's
+// first stop from the current one on: ahead -> the whole planned load, at it
+// -> what is on board. With a plan: ahead -> the site's share, at it -> no
+// more than the share.
+static float HookTransit(BYTE* world, BYTE* res, BYTE* truck, BYTE* site, char flag)
 {
-    float delta = 0.0f;
+    float game = g_transit(world, res, truck, site, flag);
+    if (!truck || !site || flag) return game;
     EnterCriticalSection(&g_lock);
-    if (!g_plans.empty()) {
-        for (size_t i = 0, n = Count(site, B_SITE_OFFICES, 8); i < n; ++i) {
-            BYTE* office = Ptr(Item(site, B_SITE_OFFICES, 8, i), 0);
-            if (!office) continue;
-            for (size_t j = 0, m = Count(office, B_VEHICLES, 8); j < m; ++j) {
-                BYTE* truck = Ptr(Item(office, B_VEHICLES, 8, j), 0);
-                auto it = truck ? g_plans.find(truck) : g_plans.end();
-                if (it == g_plans.end()) continue;
-                if (!PlanValid(truck, it->second)) { g_plans.erase(it); continue; }
-                float game, plan;
-                Reserved(truck, it->second, site, res, job, &game, &plan);
-                delta += plan - game;
+    float r = game;
+    auto it = g_plans.find(truck);
+    if (it != g_plans.end() && Finished(truck, it->second)) {
+        g_plans.erase(it);
+    }
+    else if (it != g_plans.end()) {
+        if (it->second.res == res) {
+            const Plan& p = it->second;
+            int at = Get<int>(truck, V_STOP_INDEX);
+            if (at < 0) at = 0;
+            int k = -1;
+            for (size_t i = at, n = Count(truck, V_STOPS, 8); i < n; ++i)
+                if (Stop(truck, i) == site) { k = (int)i; break; }
+            for (int i = 0; i < p.n; ++i) {
+                if (p.s[i].index != k) continue;
+                if (at < k) r = p.s[i].amount;
+                else if (game > p.s[i].amount) r = p.s[i].amount;
+                break;
             }
         }
     }
     LeaveCriticalSection(&g_lock);
-    return delta;
-}
-
-// ---------------------------------------------------------------- hooks
-#define NO_NEED -1.0e30f
-
-// FUN_14014cdc0: need = what the current phase asks for, have = delivered +
-// in transit; true while need > have.
-static bool HookSiteNeed(BYTE* world, BYTE* site, BYTE* res, int job, float* need, float* have,
-                         float* progress, float* loading, BYTE* source)
-{
-    if (need) *need = NO_NEED;
-    bool r = g_siteNeed(world, site, res, job, need, have, progress, loading, source);
-    static LONG traced;
-    if (cfg.trace && InterlockedIncrement(&traced) <= 60)
-        Logf("constructlog  [trace] need site %p res %p job %d: need %.2f have %.2f -> %d", site, res, job,
-             need ? *need : -1.0f, have ? *have : -1.0f, (int)r);
-    if (!site || !need || !have || *need == NO_NEED) return r;      // resource not in this phase
-    float delta = PlanCorrection(site, res, job);
-    if (delta == 0.0f) return r;
-    *have += delta;
-    return *need - *have > 0.0f;
+    return r;
 }
 
 struct Candidate { BYTE* site; float need; };
 
-// After the game gave the truck source -> site -> office: more sites on the way.
-static const char* Extend(BYTE* world, BYTE* truck, BYTE* office)
+// A one-site trip is remembered too, so its rest goes after the site.
+static void Remember(BYTE* truck, BYTE* res, BYTE* source, BYTE* site, float amount)
 {
-    int job = Get<int>(truck, V_JOB);
-    if (job < 0 || job > 31 || !(cfg.jobs & (1u << job))) return "job not in jobs";
+    Plan plan = {};
+    plan.res = res; plan.source = source;
+    plan.s[plan.n++] = { site, 1, amount };
+    EnterCriticalSection(&g_lock);
+    g_plans[truck] = plan;
+    LeaveCriticalSection(&g_lock);
+}
+
+// Load amount t plus the margin, as a fraction of the capacity. Without the
+// margin a few hundredths of a tonne go missing on the way and the office
+// sends a truck again for 0.03 t.
+static void SetLoad(BYTE* truck, float amount, float cap)
+{
+    float load = (amount + cfg.margin) / cap;
+    if (load > 1.0f) load = 1.0f;
+    Set<float>(Record(truck, 0), REC_LOAD, load);
+}
+
+// After the game gave the truck source -> site -> office: more sites on the way.
+static const char* Extend(BYTE* world, BYTE* job, BYTE* office)
+{
+    BYTE* truck  = Ptr(job, J_TRUCK);
+    BYTE* first  = Ptr(job, J_SITE);
+    BYTE* source = Ptr(job, J_SOURCE);
+    BYTE* res    = Ptr(job, J_RESOURCE);
+    if (!truck || !first || !res) return "not a delivery";
+    if (!source) return "no source";
+    if (Get<int>(job, J_NO_RETURN) != 0) return "no return to the office";
+    if (res == Ptr(world, W_WORKERS)) return "workers";
+    BYTE* type = Ptr(truck, V_TYPE);
+    if (!type) return "no vehicle type";
+    int cls = Get<int>(type, T_CLASS);
+    if (cls == 7 || cls == 0x12) return "not a cargo vehicle";
     if (Count(truck, V_STOPS, 8) != 3 || Count(truck, V_RECORDS, REC_SIZE) != 3) return "not 3 stops";
-    BYTE* source = Stop(truck, 0);
-    BYTE* first  = Stop(truck, 1);
-    if (!source || !first || Stop(truck, 2) != office) return "not source-site-office";
+    if (Stop(truck, 0) != source || Stop(truck, 1) != first || Stop(truck, 2) != office) return "not source-site-office";
 
-    BYTE* rec0 = Item(truck, V_RECORDS, REC_SIZE, 0);
-    float load = Get<float>(rec0, REC_LOAD);
-    if (load >= 0.999f) return "already full";
-    if (Count(rec0, REC_FILTER, 16) == 0) return "no cargo filter";
-    BYTE* res = Ptr(Item(rec0, REC_FILTER, 16, 0), 0);
-    float cap = Capacity(truck, res);
+    float cap = g_capacity(truck, res, 1, 0);
     if (!(cap > 0.0f)) return "no capacity";
-
-    // The game's load: need / capacity + 0.01.
-    float firstNeed = (load - 0.01f) * cap;
-    if (firstNeed < 0.0f) firstNeed = 0.0f;
-    float room = cap - firstNeed;
-    if (room < cfg.minExtra) return "no room";
+    float load = Get<float>(Record(truck, 0), REC_LOAD);
+    if (load >= 0.999f) return "already full";
+    float firstNeed = load * cap;
+    // The margin stays free even when the sites could fill the truck: a full
+    // truck delivers a few hundredths less than loaded, and a share planned
+    // to the last tonne then leaves its site short by that much.
+    float room = cap - firstNeed - cfg.margin;
+    if (room < cfg.minExtra) { SetLoad(truck, firstNeed, cap); Remember(truck, res, source, first, firstNeed); return "no room"; }
 
     Candidate cand[64];
     int nc = 0;
@@ -255,14 +294,14 @@ static const char* Extend(BYTE* world, BYTE* truck, BYTE* office)
         BYTE* site = Ptr(Item(office, B_OFFICE_SITES, 8, i), 0);
         if (!site || site == first) continue;
         if (cfg.maxDistance > 0.0f && Distance(first, site) > cfg.maxDistance) continue;
-        float need = 0.0f, have = 0.0f, progress = 0.0f;
-        if (!HookSiteNeed(world, site, res, job, &need, &have, &progress, 0, source)) continue;
-        if (need - have >= cfg.minExtra) cand[nc++] = { site, need - have };
+        float transit = 0.0f;
+        float need = g_need(world, site, res, 1, &transit);
+        if (need >= cfg.minExtra) cand[nc++] = { site, need };
     }
-    if (!nc) return "no other site needs it";
+    if (!nc) { SetLoad(truck, firstNeed, cap); Remember(truck, res, source, first, firstNeed); return "no other site needs it"; }
 
     Plan plan = {};
-    plan.job = job; plan.res = res; plan.source = source;
+    plan.res = res; plan.source = source;
     plan.s[plan.n++] = { first, 1, firstNeed };
     BYTE* last = first;
     float extra = 0.0f;
@@ -287,27 +326,20 @@ static const char* Extend(BYTE* world, BYTE* truck, BYTE* office)
             Logf("constructlog  truck %p: stop not inserted as expected, trip left at %d sites", truck, plan.n);
             break;
         }
-        // The new stop unloads like the first site.
-        BYTE* from = Item(truck, V_RECORDS, REC_SIZE, 1);
-        BYTE* to   = Item(truck, V_RECORDS, REC_SIZE, after + 1);
-        to[0] = from[0];
-        memcpy(to + 0x04, from + 0x04, 4);
-        memcpy(to + 0x20, from + 0x20, 9);
-        to[0xC8] = from[0xC8];
-        memcpy(to + 0xCC, from + 0xCC, 4);
-        memcpy(to + 0xE8, from + 0xE8, 9);
+        // The new stop unloads, as the dispatch sets up the first site.
+        BYTE* rec = Record(truck, after + 1);
+        rec[REC_LOAD_ON]   = 0;
+        rec[REC_UNLOAD_ON] = 1;
+        Set<float>(rec, REC_UNLOAD, 1.0f);
 
         plan.s[plan.n++] = { site, after + 1, amount };
         room  -= amount;
         extra += amount;
         last   = site;
     }
-    if (plan.n < 2) return "nothing inserted";
+    if (plan.n < 2) { SetLoad(truck, firstNeed, cap); Remember(truck, res, source, first, firstNeed); return "nothing inserted"; }
 
-    float newLoad = (firstNeed + extra) / cap + 0.01f;
-    if (newLoad > 1.0f) newLoad = 1.0f;
-    rec0 = Item(truck, V_RECORDS, REC_SIZE, 0);                 // the inserts may have moved it
-    memcpy(rec0 + REC_LOAD, &newLoad, 4);
+    SetLoad(truck, firstNeed + extra, cap);             // the inserts may have moved the records
 
     EnterCriticalSection(&g_lock);
     g_plans[truck] = plan;
@@ -315,8 +347,8 @@ static const char* Extend(BYTE* world, BYTE* truck, BYTE* office)
 
     if (cfg.log) {
         char line[512];
-        int k = _snprintf_s(line, sizeof(line), _TRUNCATE, "constructlog  truck %p job %d: load %.1f of %.1f (was %.1f), sites",
-                            truck, job, (firstNeed + extra), cap, firstNeed);
+        int k = _snprintf_s(line, sizeof(line), _TRUNCATE, "constructlog  truck %p: load %.1f of %.1f (was %.1f), sites",
+                            truck, firstNeed + extra, cap, firstNeed);
         for (int i = 0; i < plan.n && k > 0; ++i)
             k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " %p=%.1f", plan.s[i].site, plan.s[i].amount);
         Logf("%s", line);
@@ -324,10 +356,9 @@ static const char* Extend(BYTE* world, BYTE* truck, BYTE* office)
     return 0;
 }
 
-static bool HookOfficeJob(BYTE* world, BYTE* truck, BYTE* office, int a4, char a5)
+static char HookDispatch(BYTE* world, BYTE* job, BYTE* office)
 {
-    static bool first = true;
-    if (first) { first = false; Logf("constructlog  office job runs (truck %p, office %p, %d, %d)", truck, office, a4, a5); }
+    BYTE* truck = job ? Ptr(job, J_TRUCK) : 0;
     if (truck) {
         EnterCriticalSection(&g_lock);
         auto it = g_plans.find(truck);
@@ -339,55 +370,37 @@ static bool HookOfficeJob(BYTE* world, BYTE* truck, BYTE* office, int a4, char a
             if (left > 0.05f) Logf("constructlog  truck %p: new job with %.2f left on board", truck, left);
         }
     }
-    bool r = g_officeJob(world, truck, office, a4, a5);
-    static LONG traced;
-    if (cfg.trace && truck && InterlockedIncrement(&traced) <= 200) {
-        char line[512];
-        size_t n = Count(truck, V_STOPS, 8);
-        int k = _snprintf_s(line, sizeof(line), _TRUNCATE, "constructlog  [trace] job truck %p office %p (%d,%d) -> %d: job %d, at %d, stops",
-                            truck, office, a4, (int)a5, (int)r, Get<int>(truck, V_JOB), Get<int>(truck, V_STOP_INDEX));
-        for (size_t i = 0; i < n && i < 8 && k > 0; ++i)
-            k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " %p", Stop(truck, i));
-        if (Count(truck, V_RECORDS, REC_SIZE) && k > 0)
-            _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, ", load %.2f", Get<float>(Item(truck, V_RECORDS, REC_SIZE, 0), REC_LOAD));
-        Logf("%s", line);
-    }
-    if (r && truck && office) {
-        const char* why = Extend(world, truck, office);
-        if (why && cfg.log) {
-            size_t n = Count(truck, V_STOPS, 8), sites = Count(office, B_OFFICE_SITES, 8);
-            float load = Count(truck, V_RECORDS, REC_SIZE) ? Get<float>(Item(truck, V_RECORDS, REC_SIZE, 0), REC_LOAD) : -1.0f;
-            Logf("constructlog  truck %p job %d: one site (%s); stops %d, load %.2f, office sites %d",
-                 truck, Get<int>(truck, V_JOB), why, (int)n, load, (int)sites);
+    // The tick builds all its jobs first and hands them out one by one, so a
+    // job may predate a trip extended earlier in the same tick. Its need is
+    // taken again, in transit included: nothing left -> no trip, less ->
+    // a smaller load.
+    BYTE* site = job ? Ptr(job, J_SITE) : 0;
+    BYTE* res  = job ? Ptr(job, J_RESOURCE) : 0;
+    if (truck && site && res && Ptr(job, J_SOURCE) && res != Ptr(world, W_WORKERS)) {
+        float transit = 0.0f;
+        float fresh = g_need(world, site, res, 1, &transit);
+        float had = Get<float>(job, J_NEED);
+        if (fresh < 0.05f) {
+            if (cfg.log) Logf("constructlog  truck %p: no trip, site %p already served (need was %.2f)", truck, site, had);
+            return 0;
+        }
+        if (fresh < had - 0.05f) {
+            float cap = g_capacity(truck, res, 1, 0);
+            if (cap > 0.0f) {
+                float load = fresh / cap;
+                Set<float>(job, J_NEED, fresh);
+                Set<float>(job, J_LOAD, load > 1.0f ? 1.0f : load);
+                if (cfg.log) Logf("constructlog  truck %p: site %p needs %.2f now, not %.2f", truck, site, fresh, had);
+            }
         }
     }
-    return r;
-}
-
-
-// Trace: who builds an office truck's schedule. FUN_14067d5d0 itself is
-// hooked; for a truck of a construction office the caller goes to the log.
-static FnInsertStop g_insertTramp;
-
-static int TypeId(const BYTE* building)
-{
-    if (!building || !ReadablePtr(building + 0x318, 8)) return -1;
-    BYTE* type = Ptr(building, 0x318);
-    if (!type || !ReadablePtr(type + 0x360, 4)) return -1;
-    return Get<int>(type, 0x360);
-}
-
-static char HookInsertStop(BYTE* truck, BYTE* building, int after, char raw)
-{
-    BYTE* ret = (BYTE*)__builtin_return_address(0);
-    char r = g_insertTramp(truck, building, after, raw);
-    static LONG traced;
-    if (truck && ReadablePtr(truck + 0x4F8, 8)) {
-        int office = TypeId(Ptr(truck, 0x4F8));
-        if ((office == 0xC || office == 0x1C || office == 0x6A) && InterlockedIncrement(&traced) <= 300)
-            Logf("constructlog  [trace] insert stop from +%06llX: truck %p job %d, building %p type 0x%X, after %d, raw %d, now %d stops",
-                 (unsigned long long)(ret - 5 - g_exeBase), truck, Get<int>(truck, V_JOB), building, TypeId(building),
-                 after, (int)raw, (int)Count(truck, V_STOPS, 8));
+    char r = g_dispatch(world, job, office);
+    if (r && job && office) {
+        const char* why = Extend(world, job, office);
+        if (why && cfg.log)
+            Logf("constructlog  truck %p: one site %p (%s); need %.2f, load %.2f", Ptr(job, J_TRUCK), Ptr(job, J_SITE), why,
+                 Get<float>(job, J_NEED),
+                 truck && Count(truck, V_RECORDS, REC_SIZE) ? Get<float>(Record(truck, 0), REC_LOAD) : -1.0f);
     }
     return r;
 }
@@ -470,61 +483,60 @@ extern "C" __declspec(dllexport) int TsmPluginInit(const TsmHost* host, TsmPlugi
     cfg.maxDistance = (float)H->configInt(CL_INI, "constructlog", "max_distance_m", 0);
     cfg.minExtra    = (float)H->configInt(CL_INI, "constructlog", "min_extra_t", 1);
     cfg.log         = H->configInt(CL_INI, "constructlog", "log", 1);
-    cfg.trace       = H->configInt(CL_INI, "constructlog", "trace", 1);
+    cfg.clearRest   = H->configInt(CL_INI, "constructlog", "clear_rest", 1);
     {
-        char list[128];
-        H->configString(CL_INI, "constructlog", "jobs", list, sizeof(list), "1,2,3,4,5,6,9,10,11");
-        cfg.jobs = 0;
-        for (char* tok = strtok(list, ", "); tok; tok = strtok(0, ", ")) {
-            int j = atoi(tok);
-            if (j >= 0 && j < 32 && tok[0] >= '0' && tok[0] <= '9') cfg.jobs |= 1u << j;
-        }
+        char m[32];
+        H->configString(CL_INI, "constructlog", "load_margin_t", m, sizeof(m), "0.2");
+        for (char* q = m; *q; ++q) if (*q == ',') *q = '.';
+        cfg.margin = (float)atof(m);
+        if (cfg.margin < 0.0f) cfg.margin = 0.0f;
+        if (cfg.margin > 1.0f) cfg.margin = 1.0f;
     }
-    Logf("constructlog  v%s init: up to %d extra sites, max distance %.0f m, min %.0f t, jobs 0x%X",
-         CL_VERSION, cfg.maxExtra, cfg.maxDistance, cfg.minExtra, (unsigned)cfg.jobs);
+    Logf("constructlog  v%s init: up to %d extra sites, max distance %.0f m, min %.0f t, margin %.2f t",
+         CL_VERSION, cfg.maxExtra, cfg.maxDistance, cfg.minExtra, cfg.margin);
     return 0;
 }
 
 extern "C" __declspec(dllexport) int TsmPluginStart(void)
 {
     // Everything is found and counted before a byte is patched.
-    BYTE* job    = FindUnique(SIG(SIG_OFFICE_JOB));
-    BYTE* need   = FindUnique(SIG(SIG_SITE_NEED));
-    BYTE* insert = FindUnique(SIG(SIG_INSERT_STOP));
-    if (!job || !need || !insert) {
-        Logf("constructlog  not found:%s%s%s - nothing hooked", job ? "" : " office job", need ? "" : " site need",
-             insert ? "" : " insert stop");
+    BYTE* dispatch = FindUnique(SIG(SIG_DISPATCH));
+    BYTE* transit  = FindUnique(SIG(SIG_TRANSIT));
+    BYTE* need     = FindUnique(SIG(SIG_NEED));
+    BYTE* capacity = FindUnique(SIG(SIG_CAPACITY));
+    BYTE* insert   = FindUnique(SIG(SIG_INSERT_STOP));
+    BYTE* discard  = FindUnique(SIG(SIG_DISCARD));
+    if (!dispatch || !transit || !need || !capacity || !insert || !discard) {
+        Logf("constructlog  not found:%s%s%s%s%s%s - nothing hooked", dispatch ? "" : " dispatch",
+             transit ? "" : " transit", need ? "" : " need", capacity ? "" : " capacity", insert ? "" : " insert stop",
+             discard ? "" : " discard");
         return 1;
     }
-    BYTE* jobCalls[16];
-    BYTE* needCalls[16];
-    int nj = CallsTo(job, jobCalls, 16), nn = CallsTo(need, needCalls, 16);
-    if (nj != OFFICE_JOB_CALLS || nn != SITE_NEED_CALLS) {
-        Logf("constructlog  office job called %d times (%d expected), site need %d (%d expected) - nothing hooked",
-             nj, OFFICE_JOB_CALLS, nn, SITE_NEED_CALLS);
+    BYTE* dispatchCalls[8];
+    BYTE* transitCalls[8];
+    int nd = CallsTo(dispatch, dispatchCalls, 8), nt = CallsTo(transit, transitCalls, 8);
+    if (nd != DISPATCH_CALLS || nt != TRANSIT_CALLS) {
+        Logf("constructlog  dispatch called %d times (%d expected), transit %d (%d expected) - nothing hooked",
+             nd, DISPATCH_CALLS, nt, TRANSIT_CALLS);
         return 1;
     }
-    BYTE* page = AllocNear(job, 0x1000);
+    BYTE* page = AllocNear(dispatch, 0x1000);
     if (!page) { Logf("constructlog  no memory next to the game - nothing hooked"); return 1; }
 
-    g_officeJob  = (FnOfficeJob)job;
-    g_siteNeed   = (FnSiteNeed)need;
+    g_dispatch   = (FnDispatch)dispatch;
+    g_transit    = (FnTransit)transit;
+    g_need       = (FnNeed)need;
+    g_capacity   = (FnCapacity)capacity;
     g_insertStop = (FnInsertStop)insert;
-    WriteJump(page + 0x00, (void*)HookOfficeJob);
-    WriteJump(page + 0x20, (void*)HookSiteNeed);
-    Redirect(jobCalls, nj, page + 0x00);
-    Redirect(needCalls, nn, page + 0x20);
-    if (cfg.trace) {
-        static const BYTE expect[16] = { 0x48,0x89,0x54,0x24,0x10, 0x55, 0x56, 0x57, 0x41,0x54, 0x41,0x55, 0x41,0x56, 0x41,0x57 };
-        void* tramp = 0;
-        if (InstallInlineHook(insert, (void*)HookInsertStop, &tramp, expect, 16, "constructlog insert stop")) {
-            g_insertTramp = (FnInsertStop)tramp;
-            g_insertStop  = g_insertTramp;
-            Logf("constructlog  [trace] insert stop hooked");
-        } else Logf("constructlog  [trace] insert stop hook refused");
-    }
-    Logf("constructlog  office job +%06llX (%d calls), site need +%06llX (%d calls), insert stop +%06llX: hooked",
-         (unsigned long long)(job - g_exeBase), nj, (unsigned long long)(need - g_exeBase), nn,
+    g_discard    = (FnDiscard)discard;
+    WriteJump(page + 0x00, (void*)HookDispatch);
+    WriteJump(page + 0x20, (void*)HookTransit);
+    Redirect(dispatchCalls, nd, page + 0x00);
+    Redirect(transitCalls, nt, page + 0x20);
+    Logf("constructlog  dispatch +%06llX (%d calls), transit +%06llX (%d call), need +%06llX, capacity +%06llX, "
+         "insert stop +%06llX: hooked",
+         (unsigned long long)(dispatch - g_exeBase), nd, (unsigned long long)(transit - g_exeBase), nt,
+         (unsigned long long)(need - g_exeBase), (unsigned long long)(capacity - g_exeBase),
          (unsigned long long)(insert - g_exeBase));
     return 0;
 }

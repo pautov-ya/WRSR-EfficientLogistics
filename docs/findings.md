@@ -113,22 +113,65 @@ never a real rest in the vanilla game.
 - `FUN_14014e6a0` recomputes the source's load for worker buses (job 7) of a
   3-stop schedule only.
 
-## Prototype 0.1.0
+## The real dispatch path (found in game, 0.1.3 trace)
 
-- `FUN_1401561c0`'s 8 calls go through `HookOfficeJob`: after the game's job,
-  for a 3-stop delivery job with load < 1, more of the office's sites that
-  need the same resource are inserted between the first site and the office
-  (nearest first), and stop 0's load is raised to the sum.
-- `FUN_14014cdc0`'s 9 calls go through `HookSiteNeed`: `have` is corrected
-  by plan minus game for each truck with a plan, so the first site is not
-  over-reserved and the later ones are reserved.
+`FUN_1401561c0` is not what hands out deliveries: in game it was only called
+by the office window with no truck (a preview), and by the office tick for
+class 0x12 machines. Deliveries go this way (office tick `FUN_140146b10`):
+
+- the resources the office's sites need (`FUN_140155050`), then per resource
+  and site `FUN_14014eb10(world, out, site, resource, 0)` builds a 0x40-byte
+  job: `+0x00` site, `+0x08` source, `+0x10` truck, `+0x18` second vehicle,
+  `+0x20` resource, `+0x28` int (0 = return to the office), `+0x2C` score,
+  `+0x30` load fraction, `+0x34` need;
+- need = `FUN_1401544a0(world, site, resource, 1, &transit)` = required -
+  delivered of the current phase - `FUN_140154090(world, resource, site, 0)`
+  (in transit), at least 0.005;
+- in transit per truck = `FUN_1401541a0(world, resource, truck, site, 0)`, its
+  only call is in `FUN_140154090`: the site's first stop from the current one
+  on; ahead -> capacity x stop 0 load (if stop 0 loads and its filter has
+  the resource), at it -> what is on board;
+- jobs are sorted; `FUN_140155b60` picks the truck whose capacity fits the
+  need best, `FUN_14014e9f0` sets truck, source (`FUN_140155960`) and
+  `load = need / capacity` (capacity = `FUN_1406bddb0(truck, res, 1)`,
+  trailers included);
+- `FUN_140150960(world, job, office)` (3 calls) builds the schedule:
+  source (`rec+0 = 1`, `rec+4 = load`, filter `rec+8` = resource), site
+  (`rec+0 = 0`, `rec+0xC8 = 1`, `rec+0xCC = 1.0`, filter `rec+0xD0`), office
+  (both 0); then the job code via `FUN_1406b8d70`. Afterwards the tick takes
+  the truck's capacity off the job and puts it back in the list if the site
+  still needs more.
+
+## 0.2.0 - works (tested 2026-10-23)
+
+- `FUN_140150960`'s 3 calls go through `HookDispatch`: after a dispatch with
+  source -> site -> office, the office's other sites that need the resource
+  (`FUN_1401544a0`, in transit included) are inserted nearest first, up to
+  `max_extra_sites`, and stop 0's load becomes their sum / capacity (max 1).
+- The one call of `FUN_1401541a0` goes through `HookTransit`: for a truck
+  with a plan, a site ahead counts its planned share, the site it is at no
+  more than that share.
+- In game: a 25 t dump truck loaded 25 t for two road sites (17.8 + 7.2,
+  17.5 + 7.5, 14.2 + 2.8); the second site got exactly its 17.5 t over three
+  trips, nothing left on board.
 - Plans live in memory only; after a reload multi-site trucks still running
-  fall back to the game's count (some extra trips at worst).
+  fall back to the game's count.
+
+- 0.2.1: the load is the planned amount + `load_margin_t` (0.2 t): without
+  it a few hundredths of a tonne went missing and the office sent a truck
+  again for 0.03 / 0.06 t.
+- 0.2.2: several trucks in one tick - the tick builds all its jobs first, so
+  a job may predate a trip extended earlier in the same tick (a second
+  truck served one of its sites, the first kept 6.2 t on board). The
+  dispatch hook takes the job's need again (`FUN_1401544a0`, in transit
+  included): nothing left -> no trip (return 0, the truck waits for the next
+  tick), less -> job `+0x34` / `+0x30` lowered. Tested 2026-10-23: 5 houses,
+  2 trucks, all built, nothing left on board, no tiny trips.
+- A job without a source (`+0x08 = 0`) exists: the truck goes straight to
+  the site (seen with need 21.65, load 1.0) - probably cargo already on
+  board. Left alone by the plugin.
 
 ## Open
-
-- Does a truck at a site that takes nothing more (another truck was faster)
-  move on, or wait at the stop?
-- The rest left after the last site is thrown away when the truck gets its
-  next job (`FUN_1401561c0` zeroes the cargo amounts). Next: start the next
-  trip from that rest, skipping the source.
+- A rest after the last site is thrown away with the next job. Next: start
+  the next trip from it.
+- Save/load in the middle of a multi-site trip.
