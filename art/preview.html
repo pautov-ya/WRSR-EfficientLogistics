@@ -1,0 +1,171 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Efficient Logistics preview</title>
+<style>html,body{margin:0;padding:0;background:#efe1bd}svg{display:block}</style>
+</head><body>
+<!-- Steam Workshop preview, 1024x1024. Render: art/render.sh -->
+<svg id="s" xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+  <filter id="blotch" x="0" y="0" width="100%" height="100%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.012" numOctaves="3" seed="9"/>
+    <feColorMatrix type="matrix" values="0 0 0 0 0.35  0 0 0 0 0.22  0 0 0 0 0.1  0 0 0 0.9 -0.42"/>
+  </filter>
+  <radialGradient id="vig" cx="50%" cy="45%" r="75%">
+    <stop offset="60%" stop-color="#000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#2a1208" stop-opacity="0.45"/>
+  </radialGradient>
+  <clipPath id="sky"><rect x="28" y="28" width="968" height="680"/></clipPath>
+  <clipPath id="disc"><circle cx="512" cy="368" r="292"/></clipPath>
+  <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+    <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#1a0d08" flood-opacity=".45"/>
+  </filter>
+  <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+    <feDropShadow dx="3" dy="4" stdDeviation="2" flood-color="#1a0d08" flood-opacity=".4"/>
+  </filter>
+</defs>
+
+<rect width="1024" height="1024" fill="#efe1bd"/>
+
+<g clip-path="url(#sky)">
+  <rect x="0" y="0" width="1024" height="720" fill="#e9c779"/>
+  <g id="rays"></g>
+
+  <!-- cranes and blocks on both sides -->
+  <g fill="#6e3324" opacity=".8">
+    <rect x="70" y="420" width="12" height="290"/>
+    <path d="M40 420 h170 v10 h-170 Z"/><path d="M76 420 l-30 -40 h12 l26 36 Z"/>
+    <rect x="190" y="430" width="3" height="90"/><rect x="183" y="520" width="17" height="14"/>
+    <path d="M40 710 V600 h60 v-30 h70 V710 Z"/>
+    <rect x="940" y="430" width="12" height="280"/>
+    <path d="M984 430 h-170 v10 h170 Z"/><path d="M946 430 l30 -40 h-12 l-26 36 Z"/>
+    <rect x="830" y="440" width="3" height="80"/><rect x="823" y="520" width="17" height="14"/>
+    <path d="M984 710 V590 h-70 v-30 h-60 V710 Z"/>
+  </g>
+
+  <!-- the medallion: a delivery round seen from above -->
+  <circle cx="512" cy="368" r="306" fill="#241a16" filter="url(#shadow)"/>
+  <circle cx="512" cy="368" r="300" fill="#b2231a"/>
+  <circle cx="512" cy="368" r="292" fill="#cbb98a"/>
+  <g clip-path="url(#disc)">
+    <rect x="200" y="60" width="640" height="640" fill="#9fae6e"/>
+    <g id="map"></g>
+  </g>
+  <circle cx="512" cy="368" r="292" fill="none" stroke="#241a16" stroke-width="5"/>
+</g>
+
+<!-- title band -->
+<rect x="28" y="708" width="968" height="288" fill="#8a1a12"/>
+<rect x="28" y="708" width="968" height="12" fill="#241a16"/>
+<text x="512" y="868" text-anchor="middle" font-family="Impact" font-size="128" textLength="920" lengthAdjust="spacingAndGlyphs" fill="#1a100c">EFFICIENT LOGISTICS</text>
+<text x="506" y="861" text-anchor="middle" font-family="Impact" font-size="128" textLength="920" lengthAdjust="spacingAndGlyphs" fill="#f3e2b4">EFFICIENT LOGISTICS</text>
+<g fill="#e3a93a">
+  <rect x="60" y="924" width="80" height="8"/><rect x="884" y="924" width="80" height="8"/>
+</g>
+<text x="512" y="956" text-anchor="middle" font-family="Impact" font-size="52" letter-spacing="3" fill="#e3a93a">ЭФФЕКТИВНАЯ ЛОГИСТИКА</text>
+
+<!-- paper -->
+<rect width="1024" height="1024" filter="url(#blotch)" opacity=".45"/>
+<rect width="1024" height="1024" fill="url(#vig)"/>
+<rect x="28" y="28" width="968" height="968" fill="none" stroke="#241a16" stroke-width="6"/>
+<rect x="12" y="12" width="1000" height="1000" fill="none" stroke="#c9a467" stroke-width="2" opacity=".7"/>
+</svg>
+
+<script>
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag, a, parent) => { const e = document.createElementNS(NS, tag); for (const k in a) e.setAttribute(k, a[k]); parent.appendChild(e); return e; };
+
+// sunburst from the medallion
+const rays = document.getElementById('rays');
+const cx = 512, cy = 368, R = 1600, n = 32;
+for (let i = 0; i < n; i += 2) {
+  const a0 = (i / n) * 2 * Math.PI, a1 = ((i + 1) / n) * 2 * Math.PI;
+  const col = (i / 2) % 2 ? '#9c1f17' : '#c4321f';
+  el('path', { d: `M${cx} ${cy} L${cx + R * Math.cos(a0)} ${cy + R * Math.sin(a0)} L${cx + R * Math.cos(a1)} ${cy + R * Math.sin(a1)} Z`, fill: col }, rays);
+}
+
+const map = document.getElementById('map');
+const ASPHALT = '#3b3430', EDGE = '#e9dfc4', MARK = '#f3e2b4';
+const W = 26;
+
+function road(d) {
+  el('path', { d, fill: 'none', stroke: EDGE, 'stroke-width': W + 6, 'stroke-linecap': 'square' }, map);
+  el('path', { d, fill: 'none', stroke: ASPHALT, 'stroke-width': W, 'stroke-linecap': 'square' }, map);
+}
+function centre(d) {
+  el('path', { d, fill: 'none', stroke: MARK, 'stroke-width': 2.5, 'stroke-dasharray': '12 12' }, map);
+}
+
+// a street grid: two avenues across, two streets down
+const rows = [cy - 75, cy + 85], cols = [cx - 110, cx + 110];
+const roads = [];
+for (const y of rows) roads.push(`M${cx - 330} ${y} L${cx + 330} ${y}`);
+for (const x of cols) roads.push(`M${x} ${cy - 330} L${x} ${cy + 330}`);
+for (const d of roads) road(d);
+for (const d of roads) centre(d);
+
+const trees = [[-55, -175], [35, -205], [-190, -175], [-215, 160], [-15, 195], [65, 160], [-70, 185], [235, 0]];
+for (const [dx, dy] of trees) {
+  el('circle', { cx: cx + dx, cy: cy + dy, r: 16, fill: '#6f8a4a' }, map);
+  el('circle', { cx: cx + dx - 5, cy: cy + dy - 5, r: 8, fill: '#8aa35c' }, map);
+}
+
+// a building: a block with a roof colour and a dark rim
+function building(x, y, w, h, roof) {
+  el('rect', { x: x - w / 2, y: y - h / 2, width: w, height: h, fill: roof, stroke: '#241a16', 'stroke-width': 3, filter: 'url(#soft)' }, map);
+}
+
+// the source: a big warehouse with roof ridges
+const src = [cx - 200, cy + 5];
+building(src[0], src[1], 90, 128, '#a5604a');
+for (let i = -1; i <= 1; ++i)
+  el('path', { d: `M${src[0] + i * 22} ${src[1] - 64} V${src[1] + 64}`, stroke: '#7c3f30', 'stroke-width': 3 }, map);
+
+// the destinations
+const d1 = [cx, cy + 5], d2 = [cx + 170, cy - 145], d3 = [cx + 165, cy + 148];
+// 1: a site under construction - a frame, blocks and a crane
+el('rect', { x: d1[0] - 55, y: d1[1] - 40, width: 110, height: 80, fill: '#d8c79a', stroke: '#241a16', 'stroke-width': 3, 'stroke-dasharray': '10 6' }, map);
+for (let i = -1; i <= 1; ++i) el('rect', { x: d1[0] + i * 32 - 10, y: d1[1] - 18, width: 20, height: 46, fill: '#8f8676', stroke: '#241a16', 'stroke-width': 2 }, map);
+el('path', { d: `M${d1[0] - 80} ${d1[1] - 30} H${d1[0] + 45}`, stroke: '#e3a93a', 'stroke-width': 9, 'stroke-linecap': 'round' }, map);
+el('rect', { x: d1[0] - 66, y: d1[1] - 40, width: 20, height: 20, fill: '#241a16' }, map);
+el('rect', { x: d1[0] - 92, y: d1[1] - 37, width: 14, height: 14, fill: '#6d655a', stroke: '#241a16', 'stroke-width': 2 }, map);
+el('path', { d: `M${d1[0] + 36} ${d1[1] - 30} V${d1[1] - 8}`, stroke: '#241a16', 'stroke-width': 2 }, map);
+// 2: a shop
+building(d2[0], d2[1], 76, 60, '#2f5d8a');
+el('rect', { x: d2[0] - 38, y: d2[1] + 15, width: 76, height: 15, fill: '#c4321f', stroke: '#241a16', 'stroke-width': 3 }, map);
+// 3: a storage
+building(d3[0], d3[1], 80, 64, '#8f8676');
+for (let i = -1; i <= 1; ++i) el('rect', { x: d3[0] + i * 24 - 8, y: d3[1] - 24, width: 16, height: 48, fill: '#6d655a' }, map);
+
+// the round: source -> 1 -> 2 -> 3, along the roads
+const [r1, r2] = rows, [c1, c2] = cols;
+const path = `M${src[0]} ${r1} L${c1} ${r1} L${c1} ${r2} L${d1[0]} ${r2} L${d1[0]} ${d1[1] + 42}` +
+             ` M${d1[0]} ${r2} L${c2} ${r2} L${c2} ${r1} L${d2[0]} ${r1} L${d2[0]} ${d2[1] + 32}` +
+             ` M${c2} ${r2} L${d3[0]} ${r2} L${d3[0]} ${d3[1] - 34}`;
+el('path', { d: path, fill: 'none', stroke: '#1a100c', 'stroke-width': 12, opacity: .3, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, map);
+el('path', { d: path, fill: 'none', stroke: '#e3a93a', 'stroke-width': 8, 'stroke-dasharray': '18 10',
+             'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, map);
+
+// numbered pins
+function pin(x, y, label) {
+  el('circle', { cx: x, cy: y, r: 24, fill: '#b2231a', stroke: '#f3e2b4', 'stroke-width': 4, filter: 'url(#soft)' }, map);
+  const t = el('text', { x, y: y + 12, 'text-anchor': 'middle', 'font-family': 'Impact', 'font-size': 34, fill: '#f3e2b4' }, map);
+  t.textContent = label;
+}
+pin(cx + 72, cy + 30, '1');
+pin(cx + 170, cy - 200, '2');
+pin(cx + 165, cy + 205, '3');
+// a star on the source
+const star = (x, y, r) => { let d = ''; for (let i = 0; i < 10; ++i) { const a = -Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? r * .45 : r; d += (i ? 'L' : 'M') + (x + rr * Math.cos(a)) + ' ' + (y + rr * Math.sin(a)); } return d + 'Z'; };
+el('circle', { cx: src[0], cy: src[1], r: 30, fill: '#b2231a', stroke: '#f3e2b4', 'stroke-width': 4, filter: 'url(#soft)' }, map);
+el('path', { d: star(src[0], src[1], 20), fill: '#e3a93a' }, map);
+
+// the truck on the first avenue, full: cab ahead, a loaded dump body behind
+function truck(x, y) {
+  const g = el('g', { filter: 'url(#soft)' }, map);
+  el('rect', { x: x - 34, y: y - 11, width: 46, height: 22, rx: 2, fill: '#5a6b3a', stroke: '#1a100c', 'stroke-width': 2.5 }, g);
+  for (let i = 0; i < 4; ++i) el('circle', { cx: x - 26 + i * 10, cy: y - 2 + (i % 2) * 5, r: 5, fill: '#a5604a' }, g);
+  el('rect', { x: x + 14, y: y - 11, width: 20, height: 22, rx: 3, fill: '#c4321f', stroke: '#1a100c', 'stroke-width': 2.5 }, g);
+  el('rect', { x: x + 27, y: y - 8, width: 5, height: 16, fill: '#9fc3d6' }, g);
+}
+truck(cx - 165, r1);
+</script>
+</body></html>

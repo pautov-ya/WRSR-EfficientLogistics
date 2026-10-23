@@ -1,6 +1,6 @@
-// constructlog - construction office trucks deliver to several sites in one
-// trip; road distribution office trucks to several destinations (the
-// logistics part below).
+// Efficient Logistics - construction office trucks deliver to several sites in
+// one trip; road distribution office (supply base) trucks to several
+// destinations (the logistics part below).
 //
 // Each office tick builds a list of jobs, one per site and resource
 // (FUN_14014eb10: the site's need = required - delivered - in transit), picks
@@ -30,8 +30,8 @@
 #include <math.h>
 #include <unordered_map>
 
-#define CL_VERSION "0.3.2"
-#define CL_INI     "plugins\\constructlog.ini"
+#define CL_VERSION "1.0.0"
+#define CL_INI     "plugins\\efficientlogistics.ini"
 
 // ---------------------------------------------------------------- signatures (1.1.1.9)
 static const short SIG_DISPATCH[] = {       // FUN_140150960(world, job*, office) -> char
@@ -237,14 +237,14 @@ static bool Finished(BYTE* truck, const Plan& p)
         BYTE* office = Ptr(truck, V_OFFICE);
         size_t n = Count(truck, V_STOPS, 8);
         over = office && (Ptr(truck, V_IN) == office || (at >= 0 && (size_t)at < n && Stop(truck, at) == office));
-        if (!over && cfg.log) Logf("constructlog  truck %p: schedule changed, its plan is dropped", truck);
+        if (!over && cfg.log) Logf("EfficientLogistics  truck %p: schedule changed, its plan is dropped", truck);
         if (!over) return true;                           // dropped, nothing thrown away
     }
     if (!over) return false;
     float left = CargoTotal(truck);
     if (cfg.clearRest && left > 0.0f) {
         g_discard(truck, 0);
-        if (cfg.log) Logf("constructlog  truck %p: trip done, %.2f left on board thrown away", truck, left);
+        if (cfg.log) Logf("EfficientLogistics  truck %p: trip done, %.2f left on board thrown away", truck, left);
     }
     return true;
 }
@@ -370,7 +370,7 @@ static const char* Extend(BYTE* world, BYTE* job, BYTE* office)
         g_insertStop(truck, site, after, 1);
         if (Count(truck, V_STOPS, 8) != before + 1 || Stop(truck, after + 1) != site ||
             Count(truck, V_RECORDS, REC_SIZE) != before + 1) {
-            Logf("constructlog  truck %p: stop not inserted as expected, trip left at %d sites", truck, plan.n);
+            Logf("EfficientLogistics  truck %p: stop not inserted as expected, trip left at %d sites", truck, plan.n);
             break;
         }
         // The new stop unloads, as the dispatch sets up the first site.
@@ -394,7 +394,7 @@ static const char* Extend(BYTE* world, BYTE* job, BYTE* office)
 
     if (cfg.log) {
         char line[512];
-        int k = _snprintf_s(line, sizeof(line), _TRUNCATE, "constructlog  truck %p: load %.1f of %.1f (was %.1f), sites",
+        int k = _snprintf_s(line, sizeof(line), _TRUNCATE, "EfficientLogistics  truck %p: load %.1f of %.1f (was %.1f), sites",
                             truck, firstNeed + extra, cap, firstNeed);
         for (int i = 0; i < plan.n && k > 0; ++i)
             k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " %p=%.1f", plan.s[i].site, plan.s[i].amount);
@@ -414,7 +414,7 @@ static char HookDispatch(BYTE* world, BYTE* job, BYTE* office)
         LeaveCriticalSection(&g_lock);
         if (had && cfg.log) {
             float left = CargoTotal(truck);
-            if (left > 0.05f) Logf("constructlog  truck %p: new job with %.2f left on board", truck, left);
+            if (left > 0.05f) Logf("EfficientLogistics  truck %p: new job with %.2f left on board", truck, left);
         }
     }
     // The tick builds all its jobs first and hands them out one by one, so a
@@ -428,7 +428,7 @@ static char HookDispatch(BYTE* world, BYTE* job, BYTE* office)
         float fresh = g_need(world, site, res, 1, &transit);
         float had = Get<float>(job, J_NEED);
         if (fresh < 0.05f) {
-            if (cfg.log) Logf("constructlog  truck %p: no trip, site %p already served (need was %.2f)", truck, site, had);
+            if (cfg.log) Logf("EfficientLogistics  truck %p: no trip, site %p already served (need was %.2f)", truck, site, had);
             return 0;
         }
         if (fresh < had - 0.05f) {
@@ -437,7 +437,7 @@ static char HookDispatch(BYTE* world, BYTE* job, BYTE* office)
                 float load = fresh / cap;
                 Set<float>(job, J_NEED, fresh);
                 Set<float>(job, J_LOAD, load > 1.0f ? 1.0f : load);
-                if (cfg.log) Logf("constructlog  truck %p: site %p needs %.2f now, not %.2f", truck, site, fresh, had);
+                if (cfg.log) Logf("EfficientLogistics  truck %p: site %p needs %.2f now, not %.2f", truck, site, fresh, had);
             }
         }
     }
@@ -445,7 +445,7 @@ static char HookDispatch(BYTE* world, BYTE* job, BYTE* office)
     if (r && job && office) {
         const char* why = Extend(world, job, office);
         if (why && cfg.log)
-            Logf("constructlog  truck %p: one site %p (%s); need %.2f, load %.2f", Ptr(job, J_TRUCK), Ptr(job, J_SITE), why,
+            Logf("EfficientLogistics  truck %p: one site %p (%s); need %.2f, load %.2f", Ptr(job, J_TRUCK), Ptr(job, J_SITE), why,
                  Get<float>(job, J_NEED),
                  truck && Count(truck, V_RECORDS, REC_SIZE) ? Get<float>(Record(truck, 0), REC_LOAD) : -1.0f);
     }
@@ -488,7 +488,7 @@ static char HookInsertStop(BYTE* truck, BYTE* building, int after, char raw)
                     rec[REC_LOAD_ON], Get<float>(rec, REC_LOAD), (int)Count(rec, 0x08, 16),
                     rec[REC_UNLOAD_ON], Get<float>(rec, REC_UNLOAD), (int)Count(rec, 0xD0, 16));
     }
-    Logf("constructlog  [trace] stop from +%06llX: vehicle %p class %d, workplace %p type 0x%X, building %p type 0x%X, "
+    Logf("EfficientLogistics  [trace] stop from +%06llX: vehicle %p class %d, workplace %p type 0x%X, building %p type 0x%X, "
          "after %d raw %d -> stop %d of %d; %s; cargo %.2f",
          (unsigned long long)(ret - 5 - g_exeBase), truck, cls, Ptr(truck, V_OFFICE), work, building, TypeId(building),
          after, (int)raw, at, (int)n, recs, CargoTotal(truck));
@@ -610,8 +610,11 @@ static void HookRegisterB(BYTE* world, BYTE* truck)
 
 struct LogCandidate { BYTE* dest; BYTE* job; float free; };
 
+#define TYPE_SUPPLY_BASE 0x2B   // road distribution office; the only kind tested
+
 static const char* ExtendLogistics(BYTE* world, BYTE* truck, BYTE* office)
 {
+    if (TypeId(office) != TYPE_SUPPLY_BASE) return "not a road supply base";
     BYTE* type = Ptr(truck, V_TYPE);
     if (!type) return "no vehicle type";
     int cls = Get<int>(type, T_CLASS);
@@ -682,7 +685,7 @@ static const char* ExtendLogistics(BYTE* world, BYTE* truck, BYTE* office)
         g_insertStop(truck, dest, after, 1);
         if (Count(truck, V_STOPS, 8) != before + 1 || Stop(truck, after + 1) != dest ||
             Count(truck, V_RECORDS, REC_SIZE) != before + 1) {
-            Logf("constructlog  truck %p: stop not inserted as expected, trip left at %d destinations", truck, plan.n);
+            Logf("EfficientLogistics  truck %p: stop not inserted as expected, trip left at %d destinations", truck, plan.n);
             break;
         }
         // Set up as the dispatch does its destination: the office's
@@ -727,7 +730,7 @@ static const char* ExtendLogistics(BYTE* world, BYTE* truck, BYTE* office)
     if (cfg.log) {
         char line[512];
         int k = _snprintf_s(line, sizeof(line), _TRUNCATE,
-                            "constructlog  [logistics] truck %p: load %.1f of %.1f (was %.1f), destinations",
+                            "EfficientLogistics  [logistics] truck %p: load %.1f of %.1f (was %.1f), destinations",
                             truck, firstShare + extra, cap, firstShare);
         for (int i = 0; i < plan.n && k > 0; ++i)
             k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " %p=%.1f", plan.s[i].site, plan.s[i].amount);
@@ -748,7 +751,7 @@ static unsigned long long HookLogDispatch(BYTE* world, BYTE* truck, BYTE* office
         const char* why = ExtendLogistics(world, truck, office);
         if (why && cfg.log) {
             float load = Count(truck, V_RECORDS, REC_SIZE) ? Get<float>(Record(truck, 0), REC_LOAD) : -1.0f;
-            Logf("constructlog  [logistics] truck %p: one destination %p (%s); load %.2f", truck,
+            Logf("EfficientLogistics  [logistics] truck %p: one destination %p (%s); load %.2f", truck,
                  Count(truck, V_STOPS, 8) > 1 ? Stop(truck, 1) : (BYTE*)0, why, load);
         }
     }
@@ -821,7 +824,7 @@ extern "C" __declspec(dllexport) unsigned TsmPluginApiVersion(void)
 static float ConfigFloat(const char* key, float fallback, float lo, float hi)
 {
     char s[32];
-    if (!H->configString(CL_INI, "constructlog", key, s, sizeof(s), "") || !s[0]) return fallback;
+    if (!H->configString(CL_INI, "efficientlogistics", key, s, sizeof(s), "") || !s[0]) return fallback;
     for (char* q = s; *q; ++q) if (*q == ',') *q = '.';
     float v = (float)atof(s);
     return v < lo ? lo : v > hi ? hi : v;
@@ -830,24 +833,24 @@ static float ConfigFloat(const char* key, float fallback, float lo, float hi)
 extern "C" __declspec(dllexport) int TsmPluginInit(const TsmHost* host, TsmPluginInfo* info)
 {
     TsmBind(host);
-    info->name    = "constructlog";
+    info->name    = "efficientlogistics";
     info->version = CL_VERSION;
 
-    if (!H->configInt(CL_INI, "constructlog", "enabled", 1)) {
-        Logf("constructlog  disabled in ini");
+    if (!H->configInt(CL_INI, "efficientlogistics", "enabled", 1)) {
+        Logf("EfficientLogistics  disabled in ini");
         return 1;
     }
-    cfg.maxExtra = H->configInt(CL_INI, "constructlog", "max_extra_sites", 3);
+    cfg.maxExtra = H->configInt(CL_INI, "efficientlogistics", "max_extra_sites", 3);
     if (cfg.maxExtra < 0) cfg.maxExtra = 0;
     if (cfg.maxExtra > MAX_EXTRA) cfg.maxExtra = MAX_EXTRA;
-    cfg.maxDistance = (float)H->configInt(CL_INI, "constructlog", "max_distance_m", 0);
+    cfg.maxDistance = (float)H->configInt(CL_INI, "efficientlogistics", "max_distance_m", 0);
     cfg.minExtra    = ConfigFloat("min_extra_t", 0.1f, 0.01f, 100.0f);
-    cfg.log         = H->configInt(CL_INI, "constructlog", "log", 1);
-    cfg.clearRest   = H->configInt(CL_INI, "constructlog", "clear_rest", 1);
-    cfg.traceOthers = H->configInt(CL_INI, "constructlog", "trace_others", 0);
-    cfg.logistics   = H->configInt(CL_INI, "constructlog", "logistics", 1);
+    cfg.log         = H->configInt(CL_INI, "efficientlogistics", "log", 0);
+    cfg.clearRest   = H->configInt(CL_INI, "efficientlogistics", "clear_rest", 1);
+    cfg.traceOthers = H->configInt(CL_INI, "efficientlogistics", "trace_others", 0);
+    cfg.logistics   = H->configInt(CL_INI, "efficientlogistics", "logistics", 1);
     cfg.margin      = ConfigFloat("load_margin_t", 0.2f, 0.0f, 1.0f);
-    Logf("constructlog  v%s init: up to %d extra sites, max distance %.0f m, min %.2f t, margin %.2f t",
+    Logf("EfficientLogistics  v%s init: up to %d extra sites, max distance %.0f m, min %.2f t, margin %.2f t",
          CL_VERSION, cfg.maxExtra, cfg.maxDistance, cfg.minExtra, cfg.margin);
     return 0;
 }
@@ -862,7 +865,7 @@ extern "C" __declspec(dllexport) int TsmPluginStart(void)
     BYTE* insert   = FindUnique(SIG(SIG_INSERT_STOP));
     BYTE* discard  = FindUnique(SIG(SIG_DISCARD));
     if (!dispatch || !transit || !need || !capacity || !insert || !discard) {
-        Logf("constructlog  not found:%s%s%s%s%s%s - nothing hooked", dispatch ? "" : " dispatch",
+        Logf("EfficientLogistics  not found:%s%s%s%s%s%s - nothing hooked", dispatch ? "" : " dispatch",
              transit ? "" : " transit", need ? "" : " need", capacity ? "" : " capacity", insert ? "" : " insert stop",
              discard ? "" : " discard");
         return 1;
@@ -871,12 +874,12 @@ extern "C" __declspec(dllexport) int TsmPluginStart(void)
     BYTE* transitCalls[8];
     int nd = CallsTo(dispatch, dispatchCalls, 8), nt = CallsTo(transit, transitCalls, 8);
     if (nd != DISPATCH_CALLS || nt != TRANSIT_CALLS) {
-        Logf("constructlog  dispatch called %d times (%d expected), transit %d (%d expected) - nothing hooked",
+        Logf("EfficientLogistics  dispatch called %d times (%d expected), transit %d (%d expected) - nothing hooked",
              nd, DISPATCH_CALLS, nt, TRANSIT_CALLS);
         return 1;
     }
     BYTE* page = AllocNear(dispatch, 0x1000);
-    if (!page) { Logf("constructlog  no memory next to the game - nothing hooked"); return 1; }
+    if (!page) { Logf("EfficientLogistics  no memory next to the game - nothing hooked"); return 1; }
 
     g_dispatch   = (FnDispatch)dispatch;
     g_transit    = (FnTransit)transit;
@@ -887,11 +890,11 @@ extern "C" __declspec(dllexport) int TsmPluginStart(void)
     if (cfg.traceOthers) {
         static const BYTE expect[16] = { 0x48,0x89,0x54,0x24,0x10, 0x55, 0x56, 0x57, 0x41,0x54, 0x41,0x55, 0x41,0x56, 0x41,0x57 };
         void* tramp = 0;
-        if (InstallInlineHook(insert, (void*)HookInsertStop, &tramp, expect, 16, "constructlog insert stop")) {
+        if (InstallInlineHook(insert, (void*)HookInsertStop, &tramp, expect, 16, "EfficientLogistics insert stop")) {
             g_insertTramp = (FnInsertStop)tramp;
             g_insertStop  = g_insertTramp;
-            Logf("constructlog  [trace] other vehicles' stops are logged");
-        } else Logf("constructlog  [trace] insert stop hook refused");
+            Logf("EfficientLogistics  [trace] other vehicles' stops are logged");
+        } else Logf("EfficientLogistics  [trace] insert stop hook refused");
     }
     if (cfg.logistics) {
         BYTE* ld  = FindUnique(SIG(SIG_LOG_DISPATCH));
@@ -907,7 +910,7 @@ extern "C" __declspec(dllexport) int TsmPluginStart(void)
         int na = ra ? CallsTo(ra, raCalls, 8) : 0;
         int nb = rb ? CallsTo(rb, rbCalls, 8) : 0;
         if (!ld || !acc || !upd || !ra || !rb || !cs || nl != LOG_DISPATCH_CALLS || na != REGISTER_CALLS || nb != REGISTER_CALLS) {
-            Logf("constructlog  [logistics] not as expected (dispatch %d calls, register %d / %d) - logistics off", nl, na, nb);
+            Logf("EfficientLogistics  [logistics] not as expected (dispatch %d calls, register %d / %d) - logistics off", nl, na, nb);
         } else {
             g_logDispatch = (FnLogDispatch)ld;
             g_accept      = (FnAccept)acc;
@@ -921,7 +924,7 @@ extern "C" __declspec(dllexport) int TsmPluginStart(void)
             Redirect(ldCalls, nl, page + 0x40);
             Redirect(raCalls, na, page + 0x60);
             Redirect(rbCalls, nb, page + 0x80);
-            Logf("constructlog  [logistics] dispatch +%06llX (%d calls), register +%06llX / +%06llX: hooked",
+            Logf("EfficientLogistics  [logistics] dispatch +%06llX (%d calls), register +%06llX / +%06llX: hooked",
                  (unsigned long long)(ld - g_exeBase), nl, (unsigned long long)(ra - g_exeBase),
                  (unsigned long long)(rb - g_exeBase));
         }
@@ -930,7 +933,7 @@ extern "C" __declspec(dllexport) int TsmPluginStart(void)
     WriteJump(page + 0x20, (void*)HookTransit);
     Redirect(dispatchCalls, nd, page + 0x00);
     Redirect(transitCalls, nt, page + 0x20);
-    Logf("constructlog  dispatch +%06llX (%d calls), transit +%06llX (%d call), need +%06llX, capacity +%06llX, "
+    Logf("EfficientLogistics  dispatch +%06llX (%d calls), transit +%06llX (%d call), need +%06llX, capacity +%06llX, "
          "insert stop +%06llX: hooked",
          (unsigned long long)(dispatch - g_exeBase), nd, (unsigned long long)(transit - g_exeBase), nt,
          (unsigned long long)(need - g_exeBase), (unsigned long long)(capacity - g_exeBase),
