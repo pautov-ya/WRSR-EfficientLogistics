@@ -65,6 +65,7 @@ The game still chooses the job and the truck. The plugin then adds the other sto
 
 ## Changes
 
+- **1.0.2.** A construction office no longer skips a site that needs less than 0.05 t of a resource. Before, such a site was never finished.
 - **1.0.1.** A supply base truck is no longer topped up at its source with cargo that another trip is already bringing to the same storage. Before, the rest came back to the base.
 - **1.0.0.** First release.
 

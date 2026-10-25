@@ -30,7 +30,7 @@
 #include <math.h>
 #include <unordered_map>
 
-#define CL_VERSION "1.0.1"
+#define CL_VERSION "1.0.2"
 #define CL_INI     "plugins\\efficientlogistics.ini"
 
 // ---------------------------------------------------------------- signatures (1.1.1.9)
@@ -428,14 +428,16 @@ static char HookDispatch(BYTE* world, BYTE* job, BYTE* office)
     // The tick builds all its jobs first and hands them out one by one, so a
     // job may predate a trip extended earlier in the same tick. Its need is
     // taken again, in transit included: nothing left -> no trip, less ->
-    // a smaller load.
+    // a smaller load. A site that needs only a few hundredths from the start
+    // still gets its trip: only a need that has dropped since the job counts
+    // as served.
     BYTE* site = job ? Ptr(job, J_SITE) : 0;
     BYTE* res  = job ? Ptr(job, J_RESOURCE) : 0;
     if (truck && site && res && Ptr(job, J_SOURCE) && res != Ptr(world, W_WORKERS)) {
         float transit = 0.0f;
         float fresh = g_need(world, site, res, 1, &transit);
         float had = Get<float>(job, J_NEED);
-        if (fresh < 0.05f) {
+        if (fresh <= 0.0f || (fresh < 0.05f && fresh < had - 0.01f)) {
             if (cfg.log) Logf("EfficientLogistics  truck %p: no trip, site %p already served (need was %.2f)", truck, site, had);
             return 0;
         }
