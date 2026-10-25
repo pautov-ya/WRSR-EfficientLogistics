@@ -68,3 +68,18 @@ Each trip, the same three stops from one function:
   added job.
 - The two register wrappers -> corrected per plan: each destination ahead
   counts its share (at it: no more than what is on board).
+
+## 1.0.1: the top-up at the source
+
+- A supply base truck arriving at its source is topped up by
+  `FUN_1406b0240` (called from the vehicle update, `+69DD5B`): the load
+  becomes what the next destination can still take, never less than it was.
+  It takes the truck itself off the destination's `+0x9D0` first.
+- For a storage that amount comes from `FUN_1401e7940(_, destination,
+  resource, truck)`: free room minus 0.05, without the cargo on its way.
+  The office never sends a second truck while one is due, but a planned trip
+  brings a share the office does not know of, so the second truck loaded it
+  again (bug report: 21% -> 60%, 10 t brought back). Found with a hardware
+  write breakpoint on the record's load (branch `debug/watch-load`).
+- The single call of `FUN_1401e7940` is redirected: when another planned trip
+  brings a share to that destination, what `+0x9D0` still holds is taken off.

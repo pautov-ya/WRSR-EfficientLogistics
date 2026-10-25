@@ -30,7 +30,7 @@
 #include <math.h>
 #include <unordered_map>
 
-#define CL_VERSION "1.0.0"
+#define CL_VERSION "1.0.1"
 #define CL_INI     "plugins\\efficientlogistics.ini"
 
 // ---------------------------------------------------------------- signatures (1.1.1.9)
@@ -85,6 +85,14 @@ static const short SIG_COPY_SETTINGS[] = {  // FUN_1401e0fc0(half record, settin
     0x48,0x89,0x5c,0x24,0x08, 0x57, 0x48,0x83,0xec,0x20, 0x0f,0xb6,0x02, 0x48,0x8b,0xda, 0x88,0x01, 0x48,0x8b,0xf9,
     0x8b,0x42,0x04, 0x48,0x83,0xc2,0x08, 0x89,0x41,0x04, 0x48,0x83,0xc1,0x08, 0xe8,0x68,0x46,0xf0,0xff,
 };
+// FUN_1401e7940(_, destination, resource, truck) -> double: what a
+// destination can still take, as a fraction of the truck; called once, by
+// the top-up at the source FUN_1406b0240.
+static const short SIG_FREE_ROOM[] = {
+    0x48,0x89,0x5c,0x24,0x10, 0x48,0x89,0x74,0x24,0x18, 0x48,0x89,0x4c,0x24,0x08, 0x57, 0x48,0x83,0xec,0x50,
+    0x49,0x8b,0xf1, 0x49,0x8b,0xf8, 0x48,0x8b,0xda, 0x48,0x85,0xd2, 0x0f,0x84,-1,-1,-1,-1,
+};
+#define FREE_ROOM_CALLS    1
 #define LOG_DISPATCH_CALLS 2
 #define REGISTER_CALLS     1        // each, in the rebuild FUN_140139a70
 
@@ -596,6 +604,46 @@ static void CorrectFor(BYTE* truck, size_t list)
     LeaveCriticalSection(&g_lock);
 }
 
+
+// A truck arriving at its source is topped up (FUN_1406b0240) to what its
+// next destination can still take. For a storage the game takes its free
+// room without the cargo already on the way (FUN_1401e7940). The office
+// does not send a second truck while the first one is due, but a planned
+// trip brings a share to a destination the office knows nothing of - so the
+// second truck would load that share again. Taken off here; the top-up has
+// already taken this truck itself off the destination's in-transit.
+typedef double (*FnFreeRoom)(void* a, BYTE* dest, BYTE* res, BYTE* truck);
+static FnFreeRoom g_freeRoom;
+
+static double HookFreeRoom(void* a, BYTE* dest, BYTE* res, BYTE* truck)
+{
+    double r = g_freeRoom(a, dest, res, truck);
+    if (!dest || !res || !truck || r <= 0.0) return r;
+    int type = TypeId(dest);
+    if (type == 0 || type == 0x14) return r;               // the game counts the cargo on the way there
+    bool planned = false;
+    EnterCriticalSection(&g_lock);
+    for (auto& kv : g_lplans) {
+        if (kv.first == truck || kv.second.res != res) continue;
+        int at = Get<int>(kv.first, V_STOP_INDEX);
+        for (int i = 0; i < kv.second.n; ++i)
+            if (kv.second.s[i].site == dest && kv.second.s[i].index >= at) planned = true;
+    }
+    LeaveCriticalSection(&g_lock);
+    if (!planned) return r;
+    float coming = 0.0f;
+    for (size_t i = 0, n = Count(dest, B_RESERVED_B, 16); i < n; ++i)
+        if (Ptr(Item(dest, B_RESERVED_B, 16, i), 0) == res) coming = Get<float>(Item(dest, B_RESERVED_B, 16, i), 8);
+    float cap = g_capacity(truck, res, 0, 0);
+    if (coming <= 0.0f || !(cap > 0.0f)) return r;
+    double fixed = r - coming / cap;
+    if (fixed < 0.0) fixed = 0.0;
+    if (cfg.log)
+        Logf("EfficientLogistics  [logistics] truck %p tops up at the source: %p takes %.2f t, %.2f t of it already on the way",
+             truck, dest, r * cap, coming);
+    return fixed;
+}
+
 static void HookRegisterA(BYTE* world, BYTE* truck)
 {
     g_registerA(world, truck);
@@ -924,9 +972,17 @@ extern "C" __declspec(dllexport) int TsmPluginStart(void)
             Redirect(ldCalls, nl, page + 0x40);
             Redirect(raCalls, na, page + 0x60);
             Redirect(rbCalls, nb, page + 0x80);
-            Logf("EfficientLogistics  [logistics] dispatch +%06llX (%d calls), register +%06llX / +%06llX: hooked",
+            BYTE* fr = FindUnique(SIG(SIG_FREE_ROOM));
+            BYTE* frCalls[8];
+            int nf = fr ? CallsTo(fr, frCalls, 8) : 0;
+            if (nf == FREE_ROOM_CALLS) {
+                g_freeRoom = (FnFreeRoom)fr;
+                WriteJump(page + 0xA0, (void*)HookFreeRoom);
+                Redirect(frCalls, nf, page + 0xA0);
+            } else Logf("EfficientLogistics  [logistics] top-up at the source not found (%d calls) - left as it is", nf);
+            Logf("EfficientLogistics  [logistics] dispatch +%06llX (%d calls), register +%06llX / +%06llX, top-up %s: hooked",
                  (unsigned long long)(ld - g_exeBase), nl, (unsigned long long)(ra - g_exeBase),
-                 (unsigned long long)(rb - g_exeBase));
+                 (unsigned long long)(rb - g_exeBase), g_freeRoom ? "yes" : "no");
         }
     }
     WriteJump(page + 0x00, (void*)HookDispatch);
